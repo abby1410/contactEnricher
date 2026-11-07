@@ -16,6 +16,7 @@ import ollama
 import requests
 from bs4 import BeautifulSoup
 from ddgs import DDGS
+from streamlit.errors import StreamlitSecretNotFoundError
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -31,7 +32,14 @@ st.caption("Describe your search in one sentence. When no location is specified,
 with st.sidebar:
     st.header("⚙️ Settings & Parameters")
     selected_model = st.selectbox("Select Local LLM:", ["qwen2.5-coder:3b"], index=0)
-    ollama_url = st.text_input("Ollama Host URL:", "http://localhost:11434")
+    try:
+        default_ollama_url = st.secrets.get(
+            "OLLAMA_HOST",
+            os.getenv("OLLAMA_HOST", "http://localhost:11434")
+        )
+    except StreamlitSecretNotFoundError:
+        default_ollama_url = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+    ollama_url = st.text_input("Ollama Host URL:", default_ollama_url)
 
 ollama_client = ollama.Client(host=ollama_url.strip())
 

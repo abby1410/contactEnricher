@@ -37,6 +37,19 @@ streamlit run app.py
 
 If Ollama is not already running as a background service, start it in a separate terminal with `ollama serve`. On Windows, create the environment with `py -m venv .venv` and activate it with `.venv\\Scripts\\Activate.ps1`.
 
+## Deploy to Streamlit Community Cloud
+
+1. Connect the public `abby1410/contactEnricher` repository at [share.streamlit.io](https://share.streamlit.io/) and select `main` / `app.py`.
+2. In the app's **Settings → Secrets**, set `OLLAMA_HOST` to the URL of an Ollama service reachable from the cloud app, for example:
+
+   ```toml
+   OLLAMA_HOST = "https://your-ollama-host.example"
+   ```
+
+3. Ensure that service has `qwen2.5-coder:3b` available and permits requests from the deployed app. Do not expose an unauthenticated Ollama server to the public internet.
+
+The app reads `OLLAMA_HOST` from Streamlit secrets (or the environment) as the sidebar default. The default `localhost` address only works when Ollama runs on the same machine as the app.
+
 ## Data handling
 
 - Language-model inference uses the Ollama host configured in the sidebar (localhost by default). For hosted deployment, configure a reachable Ollama service; the deployment container's localhost is not the developer's machine.
