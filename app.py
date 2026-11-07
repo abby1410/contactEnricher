@@ -173,7 +173,7 @@ def scrape_public_page(url: str, robots_cache: dict[str, bool]) -> tuple[str, st
         finally:
             response.close()
 
-        soup = BeautifulSoup(content, "html.parser")
+        soup = BeautifulSoup(bytes(content), "html.parser")
         for element in soup(["script", "style", "noscript", "svg"]):
             element.decompose()
         return re.sub(r"\s+", " ", soup.get_text(" ", strip=True))[:12000], None
