@@ -302,12 +302,13 @@ def harvest_live_data(query_text: str, location: str, max_results: int = 100):
         ]
         for source, future in zip(pages_to_scrape, futures):
             try:
-                page_text, error = future.result()
-            except Exception as error:
-                page_text, error = "", f"{source['URL']}: {error}"
+                page_text, fetch_error = future.result()
+            except Exception as exception:
+                page_text = ""
+                fetch_error = f"{source['URL']}: {exception}"
             source["Page text"] = page_text
-            if error:
-                errors.append(f"Page fetch failed: {error}")
+            if fetch_error:
+                errors.append(f"Page fetch failed: {fetch_error}")
 
     return sources[:max_results], errors, stats
 
