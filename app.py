@@ -7,13 +7,15 @@ import csv
 import re
 import ipaddress
 import socket
+import time
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urljoin, urlparse
 from urllib.robotparser import RobotFileParser
 
 import ollama
 import requests
 from bs4 import BeautifulSoup
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -172,56 +174,142 @@ def scrape_public_page(url: str, robots_cache: dict[str, bool]) -> tuple[str, st
     return "", f"{url}: redirect limit exceeded"
 
 
-def harvest_live_data(query_text: str, location: str, max_results: int = 30):
-    """Search across relevant regions and collect bounded, robots-permitted public pages."""
-    variations = [
+def build_search_plan(query_text: str, location: str) -> list[tuple[str, str]]:
+    """Build a balanced set of topical and regional search queries."""
+    search_regions = (
+        "wt-wt", "us-en", "uk-en", "in-en", "au-en", "ca-en",
+        "sg-en", "de-de", "fr-fr", "ae-en", "za-en", "br-pt"
+    )
+    core_queries = (
         query_text,
-        f"{query_text} company people directory",
+        f"{query_text} people team",
         f"{query_text} professional profile",
-    ]
-    if location.lower() in {"not specified", "worldwide", "global", "all regions"}:
-        variations.extend(
-            f"{query_text} {region}"
-            for region in (
-                "North America", "Europe", "Asia Pacific", "South Asia",
-                "Middle East and Africa", "Latin America"
-            )
-        )
+    )
+    plan = [(query, region) for region in search_regions for query in core_queries]
 
+    if location.lower() in {"not specified", "worldwide", "global", "all regions"}:
+        additional_queries = (
+            f"{query_text} North America",
+            f"{query_text} Europe",
+            f"{query_text} Asia Pacific",
+            f"{query_text} South Asia",
+            f"{query_text} Middle East and Africa",
+            f"{query_text} Latin America",
+            f"{query_text} staff directory",
+            f"{query_text} leadership team",
+        )
+    else:
+        additional_queries = (
+            f"{query_text} staff directory",
+            f"{query_text} employee directory",
+            f"{query_text} team members",
+            f"{query_text} leadership team",
+            f"{query_text} public profile",
+            f"{query_text} company people",
+            f"{query_text} contact directory",
+            f"{query_text} employee names",
+        )
+    plan.extend((query, "wt-wt") for query in additional_queries)
+    return plan
+
+
+def harvest_live_data(query_text: str, location: str, max_results: int = 100):
+    """Search regional indexes and collect bounded, robots-permitted public pages."""
+    search_plan = build_search_plan(query_text, location)
     sources: list[dict[str, str]] = []
     errors: list[str] = []
     seen_urls: set[str] = set()
-    search_limit = max(1, max_results // len(variations))
-    with DDGS() as ddgs:
-        for query in variations:
-            try:
-                results = list(ddgs.text(query, max_results=search_limit))
-                for result in results:
-                    url = str(result.get("href", "")).strip()
-                    if not url or url in seen_urls or not is_public_web_url(url):
-                        continue
-                    seen_urls.add(url)
-                    sources.append({
-                        "Title": str(result.get("title", "")),
-                        "Snippet": str(result.get("body", "")),
-                        "URL": url,
-                        "Page text": "",
-                    })
-                    if len(sources) >= max_results:
-                        break
-            except Exception as error:
-                errors.append(f"Search failed for '{query}': {error}")
+    stats = {
+        "queries_attempted": 0,
+        "multiengine_queries": 0,
+        "fallback_queries": 0,
+        "queries_with_results": 0,
+        "queries_without_results": 0,
+        "search_failures": 0,
+    }
+    result_groups: list[list[dict[str, str]]] = []
+
+    try:
+        with DDGS(timeout=8) as ddgs:
+            for query, region in search_plan:
+                stats["queries_attempted"] += 1
+                stats["multiengine_queries"] += 1
+                try:
+                    results = ddgs.text(
+                        query=query,
+                        region=region,
+                        backend="yandex,google,bing,brave,duckduckgo,mojeek,startpage,yahoo",
+                        max_results=10,
+                    ) or []
+                except Exception as error:
+                    errors.append(f"Multi-engine search failed for '{query}' ({region}): {error}")
+                    stats["search_failures"] += 1
+                    results = []
+
+                if not results and stats["fallback_queries"] < 6:
+                    stats["fallback_queries"] += 1
+                    try:
+                        results = ddgs.text(
+                            query=query,
+                            region=region,
+                            backend="yandex",
+                            max_results=10,
+                        ) or []
+                    except Exception as error:
+                        errors.append(f"Explicit provider fallback failed for '{query}' ({region}): {error}")
+                        stats["search_failures"] += 1
+
+                if results:
+                    stats["queries_with_results"] += 1
+                    result_groups.append(results)
+                else:
+                    stats["queries_without_results"] += 1
+                time.sleep(0.15)
+    except Exception as error:
+        errors.append(f"Could not initialize web search: {error}")
+        stats["search_failures"] += 1
+
+    for result_index in range(10):
+        for results in result_groups:
+            if result_index >= len(results):
+                continue
+            result = results[result_index]
+            url = str(result.get("href", "")).strip()
+            if not url or url in seen_urls or not is_public_web_url(url):
+                continue
+            seen_urls.add(url)
+            sources.append({
+                "Title": str(result.get("title", "")),
+                "Snippet": str(result.get("body", "")),
+                "URL": url,
+                "Page text": "",
+            })
             if len(sources) >= max_results:
                 break
+        if len(sources) >= max_results:
+            break
 
     robots_cache: dict[str, bool] = {}
-    for source in sources[:12]:
-        page_text, error = scrape_public_page(source["URL"], robots_cache)
-        source["Page text"] = page_text
-        if error:
-            errors.append(f"Page fetch failed: {error}")
+    pages_to_scrape = sources[:24]
+    stats["pages_attempted"] = len(pages_to_scrape)
+    for source in pages_to_scrape:
+        robots_allows(source["URL"], robots_cache)
 
-    return sources, errors
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = [
+            executor.submit(scrape_public_page, source["URL"], robots_cache)
+            for source in pages_to_scrape
+        ]
+        for source, future in zip(pages_to_scrape, futures):
+            try:
+                page_text, error = future.result()
+            except Exception as error:
+                page_text, error = "", f"{source['URL']}: {error}"
+            source["Page text"] = page_text
+            if error:
+                errors.append(f"Page fetch failed: {error}")
+
+    return sources[:max_results], errors, stats
 
 
 def parse_model_records(response_text: str) -> list[dict]:
@@ -351,33 +439,54 @@ if submitted:
     # --- STEP 2: Live Search and Bounded Public-Page Scraping ---
     with st.status("🌐 **Agent 2 (Web Harvester):** Searching and checking public pages...", expanded=True) as status2:
         try:
-            sources, search_errors = harvest_live_data(user_query, meta["location"])
+            sources, search_errors, search_stats = harvest_live_data(
+                user_query,
+                meta["location"],
+                max_results=min(100, max(50, target_count * 2)),
+            )
         except Exception as error:
             st.error(f"Web search failed: {error}")
             st.stop()
         status2.update(
-            label=f"✅ **Agent 2 Done:** Collected {len(sources)} public search sources.",
+            label=(
+                f"✅ **Agent 2 Done:** {len(sources)} sources from "
+                f"{search_stats['queries_attempted']} regional searches."
+            ),
             state="complete",
             expanded=False
         )
 
-    st.write(f"Found {len(sources)} search sources; fetched page text from up to 12 robots-permitted pages.")
+    st.write(
+        f"Searches attempted: {search_stats['queries_attempted']} "
+        f"(multi-engine: {search_stats['multiengine_queries']}; "
+        f"explicit-provider fallbacks: {search_stats['fallback_queries']}). "
+        f"{search_stats['queries_with_results']} searches returned results; "
+        f"{search_stats['queries_without_results']} returned none; "
+        f"{search_stats['search_failures']} provider errors; "
+        f"collected {len(sources)} unique sources and attempted page retrieval for "
+        f"{search_stats['pages_attempted']} pages."
+    )
     if search_errors:
-        with st.expander("Search and page-fetch notices"):
-            for error in search_errors:
+        with st.expander(f"Search and page-fetch notices ({len(search_errors)})"):
+            for error in search_errors[:30]:
                 st.write(error)
+            if len(search_errors) > 30:
+                st.write(f"{len(search_errors) - 30} additional notices omitted.")
     if not sources:
-        st.warning("No public search results were collected. No contacts will be generated.")
+        st.warning(
+            "The search providers returned no usable results. No contacts will be generated. "
+            "Review the notices above; this can happen when a provider blocks or rate-limits requests."
+        )
         st.stop()
 
     evidence = [
         {
             "Source URL": source["URL"][:500],
             "Title": source["Title"][:300],
-            "Search snippet": source["Snippet"][:600],
-            "Public page text": source["Page text"][:1500],
+            "Search snippet": source["Snippet"][:500],
+            "Public page text": source["Page text"][:900],
         }
-        for source in sources
+        for source in sources[:60]
     ]
     evidence_text = json.dumps(evidence, ensure_ascii=False)
 
