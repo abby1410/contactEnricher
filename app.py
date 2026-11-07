@@ -17,17 +17,58 @@ st.set_page_config(
 )
 
 st.title("🕵️‍♂️ Resilient Multi-Agent Contact Miner & Lead Enricher")
-st.caption("Powered locally by Ollama (`qwen2.5-coder:3b`) with resilient web harvesting, domain pattern synthesis, and deterministic CSV serialization.")
+st.caption("Describe your search in one sentence. Ollama derives the search criteria, then the app looks for matching contacts on the web.")
 
 # --- Sidebar Configuration ---
 with st.sidebar:
     st.header("⚙️ Settings & Parameters")
     selected_model = st.selectbox("Select Local LLM:", ["qwen2.5-coder:3b"], index=0)
     ollama_url = st.text_input("Ollama Host URL:", "http://localhost:11434")
-    target_count = st.number_input("Maximum Contacts:", min_value=1, max_value=250, value=50, step=1)
 
 os.environ["OPENAI_API_BASE"] = ollama_url
 os.environ["OPENAI_API_KEY"] = "ollama"
+
+# --- Natural-language Intent Extraction ---
+def extract_search_intent(user_request: str):
+    """Derive search criteria and requested result count from one natural-language request."""
+    prompt = f"""
+Interpret the user's search request and return a JSON object with exactly these keys:
+"role", "company", "location", "count", and "search_query".
+
+Rules:
+- Extract only information stated or clearly implied by the request.
+- Use "Not specified" for an unknown role, company, or location.
+- Use 50 for count if the request does not specify a number; otherwise use the requested number.
+- Keep count as an integer.
+- Make search_query a concise web search query that preserves the requested people or thing,
+  organization, location, and other relevant criteria. Remove instruction words like "find me".
+- Do not add assumptions or extra requirements.
+
+User request:
+{user_request}
+"""
+    response = ollama.chat(
+        model=selected_model,
+        format="json",
+        messages=[{"role": "user", "content": prompt}]
+    )
+    intent = json.loads(response["message"]["content"])
+    if not isinstance(intent, dict):
+        raise ValueError("The intent response must be a JSON object.")
+
+    fields = ("role", "company", "location", "search_query")
+    for field in fields:
+        value = intent.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"The intent response is missing a valid {field}.")
+        intent[field] = value.strip()
+
+    try:
+        intent["count"] = max(1, min(250, int(intent.get("count", 50))))
+    except (TypeError, ValueError) as error:
+        raise ValueError("The intent response must include a numeric contact count.") from error
+
+    return intent
 
 # --- Resilient Web Harvester ---
 def harvest_live_data(query_text: str, max_results: int = 20):
@@ -53,14 +94,11 @@ def harvest_live_data(query_text: str, max_results: int = 20):
     return "\n---\n".join(harvested_snippets)
 
 # --- User Input UI ---
-st.subheader("📝 Choose Your Search Criteria")
+st.subheader("📝 Describe What You’re Looking For")
 with st.form("lead_search_form"):
-    role = st.text_input("Role or type of contact", placeholder="e.g. Recruiter, product manager, dentist")
-    company = st.text_input("Company or organization", placeholder="e.g. Google")
-    location = st.text_input("Location", placeholder="e.g. Hyderabad, India")
-    additional_terms = st.text_input(
-        "Additional search terms",
-        placeholder="e.g. LinkedIn profile, hiring team, public contact details"
+    user_request = st.text_input(
+        "Search request",
+        placeholder="e.g. Find me 50 recruiters at Google in Hyderabad"
     )
     submitted = st.form_submit_button(
         "🚀 Run Lead Extraction Pipeline",
@@ -69,26 +107,27 @@ with st.form("lead_search_form"):
     )
 
 if submitted:
-    search_terms = [role, company, location, additional_terms]
-    user_query = " ".join(term.strip() for term in search_terms if term.strip())
-    if not user_query:
-        st.warning("Enter at least one search criterion.")
+    if not user_request.strip():
+        st.warning("Describe what you’re looking for in one sentence.")
         st.stop()
-
-    meta = {
-        "role": role.strip() or "Not specified",
-        "company": company.strip() or "Not specified",
-        "location": location.strip() or "Not specified",
-    }
 
     log_container = st.expander("🔍 Live Agent Execution Logs", expanded=True)
 
     # --- STEP 1: Intent Extraction ---
+    with st.status("🧭 **Agent 1 (Intent Specialist):** Interpreting your request...", expanded=True) as status1:
+        try:
+            meta = extract_search_intent(user_request.strip())
+        except Exception as error:
+            st.error(f"Could not interpret your request with Ollama: {error}")
+            st.stop()
+        target_count = meta["count"]
+        user_query = meta["search_query"]
+        status1.update(label="✅ **Agent 1 Done:** Search request interpreted.", state="complete", expanded=False)
+
     with log_container:
         st.write(f"🔌 Connected to Ollama using model: `{selected_model}`")
-        st.write("🎯 **Agent 1 (Intent Specialist):** Search criteria:")
+        st.write("🎯 **Agent 1 (Intent Specialist):** Derived search parameters:")
         st.json(meta)
-        st.write(f"Search query: `{user_query}`")
 
     # --- STEP 2: Live Web Harvesting ---
     with st.status("🌐 **Agent 2 (Web Harvester):** Gathering live search web snippets...", expanded=True) as status2:
@@ -153,10 +192,10 @@ if submitted:
                 if name.strip().lower() in ["none", "null", ""]:
                     continue
                 normalized = {key: rec.get(key, "N/A") for key in fieldnames}
-                if company.strip():
-                    normalized["Company"] = company.strip()
-                if location.strip():
-                    normalized["Location"] = location.strip()
+                if meta["company"].lower() != "not specified":
+                    normalized["Company"] = meta["company"]
+                if meta["location"].lower() != "not specified":
+                    normalized["Location"] = meta["location"]
                 normalized["Status"] = "EXTRACTED FROM SEARCH RESULTS"
                 parsed_records.append(normalized)
     except Exception as e:
