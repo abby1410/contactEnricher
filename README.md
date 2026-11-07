@@ -4,6 +4,20 @@ A Streamlit app that turns unstructured lead notes, email signatures, and pasted
 
 It uses **CrewAI** to coordinate four specialist agents and **Ollama** to run language models locally.
 
+## App walkthrough
+
+The supplied screen recording shows the app's current interface and a live pipeline run.
+
+### Main workspace
+
+The landing screen provides a lead-context input area and a sidebar for configuring the Ollama host and the models used by the different stages. A sample lead is prefilled so the workflow can be explored without preparing input from scratch.
+
+### Agent execution
+
+The execution view exposes the pipeline's intermediate activity in the Streamlit interface. In the recording, the run begins with intent extraction and proceeds into retrieval of web snippets before the enrichment stage.
+
+> The recording ends while the workflow is still running. It does not demonstrate a completed contact dossier or final email, so those outputs should be treated as unverified until a full successful run is captured.
+
 ## How it works
 
 1. **Data extraction** — identifies details such as name, role, company, location, and useful context.
@@ -48,7 +62,7 @@ The app's model dropdown includes other options; download whichever model you se
 ## Privacy and research limitations
 
 - Inference uses the Ollama host configured in the sidebar (localhost by default).
-- The current app has no web-search or CRM integration. Its company/industry analysis is generated from the pasted context and the model's existing knowledge. Verify important claims independently.
+- The current app has no verified external web-search or CRM integration. The supplied recording shows a web-snippet retrieval step, but does not establish which provider supplies those snippets or whether the final research is complete. Verify important claims independently.
 - Only submit personal or business information you are authorised to process.
 
 ## Current limitations
@@ -57,9 +71,11 @@ The app's model dropdown includes other options; download whichever model you se
 - A sample lead is prefilled in the input box; replace it with your own test data.
 - The “Copy Email” button currently displays a confirmation message; it does not yet copy text to the system clipboard.
 - There is no pinned dependency file or automated test suite yet.
+- A complete successful run and final dossier still need to be captured and validated.
 
 ## Roadmap
 
+- [ ] Capture screenshots of the finished dossier and generated email
 - [ ] Add structured JSON output and editable contact fields
 - [ ] Add CSV upload and batch enrichment
 - [ ] Add evidence/source tracking for company research
