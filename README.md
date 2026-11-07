@@ -29,7 +29,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 
 python -m pip install --upgrade pip
-python -m pip install streamlit pandas ollama ddgs requests beautifulsoup4
+python -m pip install -r requirements.txt
 
 ollama pull qwen2.5-coder:3b
 streamlit run app.py
@@ -39,7 +39,7 @@ If Ollama is not already running as a background service, start it in a separate
 
 ## Data handling
 
-- Language-model inference uses the Ollama host configured in the sidebar (localhost by default).
+- Language-model inference uses the Ollama host configured in the sidebar (localhost by default). For hosted deployment, configure a reachable Ollama service; the deployment container's localhost is not the developer's machine.
 - Search queries are sent to DuckDuckGo Search, and selected public result pages are requested directly from their hosts.
 - Page retrieval is limited and obeys the site's `robots.txt`; pages that block the app are not scraped.
 - The app does not fabricate contact details to fill the requested count. Verify results using the included source URLs.

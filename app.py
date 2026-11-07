@@ -33,8 +33,7 @@ with st.sidebar:
     selected_model = st.selectbox("Select Local LLM:", ["qwen2.5-coder:3b"], index=0)
     ollama_url = st.text_input("Ollama Host URL:", "http://localhost:11434")
 
-os.environ["OPENAI_API_BASE"] = ollama_url
-os.environ["OPENAI_API_KEY"] = "ollama"
+ollama_client = ollama.Client(host=ollama_url.strip())
 
 # --- Natural-language Intent Extraction ---
 def extract_search_intent(user_request: str):
@@ -55,7 +54,7 @@ Rules:
 User request:
 {user_request}
 """
-    response = ollama.chat(
+    response = ollama_client.chat(
         model=selected_model,
         format="json",
         messages=[{"role": "user", "content": prompt}]
@@ -509,7 +508,7 @@ Evidence:
 {evidence_text}
 """
         try:
-            extraction_response = ollama.chat(
+            extraction_response = ollama_client.chat(
                 model=selected_model,
                 format="json",
                 messages=[{"role": "user", "content": extraction_prompt}]
@@ -549,7 +548,7 @@ Evidence:
 """
         with st.status("🧪 **Agent 4 (QA):** Rejecting unsupported or irrelevant records...", expanded=True) as status4:
             try:
-                qa_response = ollama.chat(
+                qa_response = ollama_client.chat(
                     model=selected_model,
                     format="json",
                     messages=[{"role": "user", "content": qa_prompt}]
