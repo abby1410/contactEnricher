@@ -204,7 +204,7 @@ def build_search_plan(query_text: str, location: str) -> list[tuple[str, str]]:
             query_text,
             f"{query_text} people",
             f"{query_text} professional profile",
-            f"{query_text} LinkedIn",
+            f"site:linkedin.com/in {query_text}",
             f"{query_text} team",
         )
     else:
@@ -214,20 +214,16 @@ def build_search_plan(query_text: str, location: str) -> list[tuple[str, str]]:
         )
         region_candidates = (
             matched_region, "wt-wt", "in-en", "us-en", "uk-en",
-            "ca-en", "au-en", "sg-en", "ae-en", "za-en",
+            "ca-en", "au-en", "sg-en", "ae-en", "de-de", "fr-fr",
+            "za-en", "br-pt",
         )
-        search_regions = tuple(dict.fromkeys(region_candidates))[:5]
+        search_regions = tuple(dict.fromkeys(region_candidates))[:10]
         query_variants = (
             query_text,
             f"{query_text} people",
             f"{query_text} professional profile",
-            f"{query_text} LinkedIn",
+            f"site:linkedin.com/in {query_text}",
             f"{query_text} team",
-            f"{query_text} employees",
-            f"{query_text} staff",
-            f"{query_text} directory",
-            f"{query_text} contact",
-            f"{query_text} site:linkedin.com/in",
         )
 
     return [
@@ -257,6 +253,7 @@ def harvest_live_data(
         "search_combinations": len(search_plan),
         "search_regions": len({region for _, region in search_plan}),
         "search_pages_attempted": 0,
+        "search_result_pages_per_combination": 3,
     }
     result_groups: list[list[dict[str, str]]] = []
 
@@ -264,9 +261,9 @@ def harvest_live_data(
         with DDGS(timeout=8) as ddgs:
             for combination_index, (query, region) in enumerate(search_plan, start=1):
                 combination_results: list[dict[str, str]] = []
-                for result_page in (1, 2):
-                    operation_index = (combination_index - 1) * 2 + result_page
-                    operation_total = len(search_plan) * 2
+                for result_page in (1, 2, 3):
+                    operation_index = (combination_index - 1) * 3 + result_page
+                    operation_total = len(search_plan) * 3
                     if progress_callback:
                         progress_callback(
                             "search",
@@ -274,7 +271,7 @@ def harvest_live_data(
                             operation_total,
                             (
                                 f"Combination {combination_index}/{len(search_plan)}, "
-                                f"results page {result_page}/2 · {region}: {query}"
+                                f"results page {result_page}/3 · {region}: {query}"
                             ),
                         )
                     stats["queries_attempted"] += 1
@@ -311,7 +308,7 @@ def harvest_live_data(
                             operation_total,
                             (
                                 f"Finished combination {combination_index}/{len(search_plan)}, "
-                                f"results page {result_page}/2 · {region}: {query}"
+                                f"results page {result_page}/3 · {region}: {query}"
                             ),
                         )
                     time.sleep(0.15)
@@ -321,7 +318,7 @@ def harvest_live_data(
         errors.append(f"Could not initialize web search: {error}")
         stats["search_failures"] += 1
 
-    for result_index in range(20):
+    for result_index in range(30):
         for results in result_groups:
             if result_index >= len(results):
                 continue
@@ -342,7 +339,8 @@ def harvest_live_data(
             break
 
     robots_cache: dict[str, bool] = {}
-    pages_to_scrape = sources[:40]
+    page_fetch_limit = min(100, max(40, max_results // 2))
+    pages_to_scrape = sources[:page_fetch_limit]
     stats["pages_attempted"] = len(pages_to_scrape)
     for page_index, source in enumerate(pages_to_scrape, start=1):
         if progress_callback:
@@ -627,7 +625,7 @@ if submitted:
             sources, search_errors, search_stats = harvest_live_data(
                 user_query,
                 meta["location"],
-                max_results=min(100, max(50, target_count * 2)),
+                max_results=min(300, max(100, target_count * 5)),
                 progress_callback=show_search_progress,
             )
         except Exception as error:
