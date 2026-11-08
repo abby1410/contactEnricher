@@ -297,7 +297,7 @@ def harvest_live_data(query_text: str, location: str, max_results: int = 100):
             break
 
     robots_cache: dict[str, bool] = {}
-    pages_to_scrape = sources[:24]
+    pages_to_scrape = sources[:40]
     stats["pages_attempted"] = len(pages_to_scrape)
     for source in pages_to_scrape:
         robots_allows(source["URL"], robots_cache)

@@ -6,7 +6,7 @@ A Streamlit app that interprets a one-sentence search request, searches the web 
 
 1. **Intent extraction** — Ollama derives the requested role, organization, location, count, and search query from one sentence.
 2. **Web search** — the app runs up to 44 topical and regional metasearch queries across engines supported by `ddgs`, using 12 search-region settings, with an explicit multi-provider fallback for empty queries. It collects up to 100 unique result URLs. Search engines do not index the entire web, so exhaustive coverage is not possible.
-3. **Public-page retrieval** — the app fetches at most 24 result pages concurrently, checks each site's `robots.txt`, follows at most three redirects, and caps each page at 1 MB.
+3. **Public-page retrieval** — the app fetches at most 40 result pages concurrently, checks each site's `robots.txt`, follows at most three redirects, and caps each page at 1 MB.
 4. **Extraction and QA** — all collected result snippets and the full text of fetched pages are passed to Ollama in size-bounded batches, rather than truncating each page to its first 900 characters. A separate QA pass reviews candidates in small batches with evidence excerpts centered on each person's name. Deterministic checks require the name, title, and cited URL to match collected evidence; unsupported fields are removed.
 5. **Export** — approved contacts are displayed and can be downloaded as CSV, including a source URL for verification.
 
