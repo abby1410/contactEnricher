@@ -9,6 +9,7 @@ import ipaddress
 import socket
 import time
 from concurrent.futures import ThreadPoolExecutor
+from typing import Callable
 from urllib.parse import urljoin, urlparse
 from urllib.robotparser import RobotFileParser
 
@@ -183,7 +184,7 @@ def scrape_public_page(url: str, robots_cache: dict[str, bool]) -> tuple[str, st
 
 
 def build_search_plan(query_text: str, location: str) -> list[tuple[str, str]]:
-    """Build a small, location-aware set of queries for Google's search index."""
+    """Build 50 topical and regional query combinations for Google's search index."""
     location_regions = {
         "india": "in-en", "hyderabad": "in-en", "bengaluru": "in-en",
         "bangalore": "in-en", "mumbai": "in-en", "delhi": "in-en",
@@ -195,43 +196,53 @@ def build_search_plan(query_text: str, location: str) -> list[tuple[str, str]]:
     }
     normalized_location = location.strip().lower()
     if normalized_location in {"not specified", "worldwide", "global", "all regions"}:
-        search_regions = ("in-en", "us-en", "uk-en", "au-en", "sg-en", "ae-en")
+        search_regions = (
+            "in-en", "us-en", "uk-en", "ca-en", "au-en",
+            "sg-en", "ae-en", "de-de", "fr-fr", "za-en",
+        )
+        query_variants = (
+            query_text,
+            f"{query_text} people",
+            f"{query_text} professional profile",
+            f"{query_text} LinkedIn",
+            f"{query_text} team",
+        )
     else:
         matched_region = next(
             (region for place, region in location_regions.items() if place in normalized_location),
             "wt-wt",
         )
-        search_regions = (matched_region, "wt-wt") if matched_region != "wt-wt" else ("wt-wt",)
-
-    core_queries = (
-        query_text,
-        f"{query_text} people team",
-        f"{query_text} professional profile",
-    )
-    plan = [(query, region) for region in search_regions for query in core_queries]
-
-    if normalized_location in {"not specified", "worldwide", "global", "all regions"}:
-        additional_queries = (
-            f"{query_text} Europe",
-            f"{query_text} Asia Pacific",
-            f"{query_text} South Asia",
-            f"{query_text} Middle East and Africa",
-            f"{query_text} Latin America",
-            f"{query_text} staff directory",
+        region_candidates = (
+            matched_region, "wt-wt", "in-en", "us-en", "uk-en",
+            "ca-en", "au-en", "sg-en", "ae-en", "za-en",
         )
-    else:
-        additional_queries = (
-            f"{query_text} staff directory",
-            f"{query_text} employee directory",
-            f"{query_text} team members",
-            f"{query_text} leadership team",
-            f"{query_text} company people",
+        search_regions = tuple(dict.fromkeys(region_candidates))[:5]
+        query_variants = (
+            query_text,
+            f"{query_text} people",
+            f"{query_text} professional profile",
+            f"{query_text} LinkedIn",
+            f"{query_text} team",
+            f"{query_text} employees",
+            f"{query_text} staff",
+            f"{query_text} directory",
+            f"{query_text} contact",
+            f"{query_text} site:linkedin.com/in",
         )
-    plan.extend((query, "wt-wt") for query in additional_queries)
-    return list(dict.fromkeys(plan))
+
+    return [
+        (query, region)
+        for region in search_regions
+        for query in query_variants
+    ]
 
 
-def harvest_live_data(query_text: str, location: str, max_results: int = 100):
+def harvest_live_data(
+    query_text: str,
+    location: str,
+    max_results: int = 100,
+    progress_callback: Callable[[str, int, int, str], None] | None = None,
+):
     """Search regional indexes and collect bounded, robots-permitted public pages."""
     search_plan = build_search_plan(query_text, location)
     sources: list[dict[str, str]] = []
@@ -243,40 +254,74 @@ def harvest_live_data(query_text: str, location: str, max_results: int = 100):
         "queries_with_results": 0,
         "queries_without_results": 0,
         "search_failures": 0,
+        "search_combinations": len(search_plan),
+        "search_regions": len({region for _, region in search_plan}),
+        "search_pages_attempted": 0,
     }
     result_groups: list[list[dict[str, str]]] = []
 
     try:
         with DDGS(timeout=8) as ddgs:
-            for query, region in search_plan:
-                stats["queries_attempted"] += 1
-                stats["google_queries"] += 1
-                try:
-                    results = ddgs.text(
-                        query=query,
-                        region=region,
-                        backend="google",
-                        max_results=10,
-                    ) or []
-                except Exception as error:
-                    if isinstance(error, DDGSException) and "No results found" in str(error):
+            for combination_index, (query, region) in enumerate(search_plan, start=1):
+                combination_results: list[dict[str, str]] = []
+                for result_page in (1, 2):
+                    operation_index = (combination_index - 1) * 2 + result_page
+                    operation_total = len(search_plan) * 2
+                    if progress_callback:
+                        progress_callback(
+                            "search",
+                            operation_index - 1,
+                            operation_total,
+                            (
+                                f"Combination {combination_index}/{len(search_plan)}, "
+                                f"results page {result_page}/2 · {region}: {query}"
+                            ),
+                        )
+                    stats["queries_attempted"] += 1
+                    stats["google_queries"] += 1
+                    stats["search_pages_attempted"] += 1
+                    try:
+                        results = ddgs.text(
+                            query=query,
+                            region=region,
+                            backend="google",
+                            max_results=10,
+                            page=result_page,
+                        ) or []
+                    except Exception as error:
+                        if isinstance(error, DDGSException) and "No results found" in str(error):
+                            results = []
+                        else:
+                            errors.append(
+                                f"Google search failed for '{query}' ({region}, "
+                                f"results page {result_page}): {error}"
+                            )
+                            stats["search_failures"] += 1
                         results = []
-                    else:
-                        errors.append(f"Google search failed for '{query}' ({region}): {error}")
-                        stats["search_failures"] += 1
-                    results = []
 
-                if results:
-                    stats["queries_with_results"] += 1
-                    result_groups.append(results)
-                else:
-                    stats["queries_without_results"] += 1
-                time.sleep(0.15)
+                    if results:
+                        stats["queries_with_results"] += 1
+                        combination_results.extend(results)
+                    else:
+                        stats["queries_without_results"] += 1
+                    if progress_callback:
+                        progress_callback(
+                            "search",
+                            operation_index,
+                            operation_total,
+                            (
+                                f"Finished combination {combination_index}/{len(search_plan)}, "
+                                f"results page {result_page}/2 · {region}: {query}"
+                            ),
+                        )
+                    time.sleep(0.15)
+                if combination_results:
+                    result_groups.append(combination_results)
     except Exception as error:
         errors.append(f"Could not initialize web search: {error}")
         stats["search_failures"] += 1
 
-    for result_index in range(10):
+    for result_index in range(20):
         for results in result_groups:
             if result_index >= len(results):
                 continue
@@ -299,7 +344,14 @@ def harvest_live_data(query_text: str, location: str, max_results: int = 100):
     robots_cache: dict[str, bool] = {}
     pages_to_scrape = sources[:40]
     stats["pages_attempted"] = len(pages_to_scrape)
-    for source in pages_to_scrape:
+    for page_index, source in enumerate(pages_to_scrape, start=1):
+        if progress_callback:
+            progress_callback(
+                "scrape",
+                page_index - 1,
+                len(pages_to_scrape),
+                f"Checking robots.txt for {source['URL']}",
+            )
         robots_allows(source["URL"], robots_cache)
 
     with ThreadPoolExecutor(max_workers=5) as executor:
@@ -307,7 +359,7 @@ def harvest_live_data(query_text: str, location: str, max_results: int = 100):
             executor.submit(scrape_public_page, source["URL"], robots_cache)
             for source in pages_to_scrape
         ]
-        for source, future in zip(pages_to_scrape, futures):
+        for page_index, (source, future) in enumerate(zip(pages_to_scrape, futures), start=1):
             try:
                 page_text, fetch_error = future.result()
             except Exception as exception:
@@ -316,6 +368,13 @@ def harvest_live_data(query_text: str, location: str, max_results: int = 100):
             source["Page text"] = page_text
             if fetch_error:
                 errors.append(f"Page fetch failed: {fetch_error}")
+            if progress_callback:
+                progress_callback(
+                    "scrape",
+                    page_index,
+                    len(pages_to_scrape),
+                    f"Processed public page {page_index}/{len(pages_to_scrape)}: {source['URL']}",
+                )
 
     return sources[:max_results], errors, stats
 
@@ -393,12 +452,64 @@ def normalize_for_match(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
 
 
+def candidate_validation_rejection(
+    candidate: dict,
+    source: dict[str, str],
+    seen_names: set[str],
+    criteria: dict[str, str],
+) -> str | None:
+    """Return a concise reason when a candidate fails deterministic source checks."""
+    name = str(candidate.get("Name", "")).strip()
+    source_text = normalize_for_match(
+        f"{source['Title']} {source['Snippet']} {source['Page text']}"
+    )
+    normalized_name = normalize_for_match(name)
+    if (
+        len(normalized_name.split()) < 2
+        or normalized_name in {"john doe", "jane doe", "unknown person", "not available"}
+        or not normalized_name
+        or normalized_name not in source_text
+    ):
+        return "name_not_supported"
+
+    title = str(candidate.get("Title", "")).strip()
+    normalized_title = normalize_for_match(title)
+    if not title or title.lower() == "n/a" or normalized_title not in source_text:
+        return "title_not_supported"
+
+    requested_role = normalize_for_match(criteria["role"])
+    if requested_role != "not specified":
+        role_tokens = [token.rstrip("s") for token in requested_role.split()]
+        if not all(token in normalized_title.split() for token in role_tokens):
+            return "role_mismatch"
+
+    expected_company = normalize_for_match(criteria["company"])
+    if expected_company != "not specified" and expected_company not in source_text:
+        return "company_not_supported"
+
+    expected_location = normalize_for_match(criteria["location"])
+    actual_location = normalize_for_match(str(candidate.get("Location", "")))
+    if (
+        expected_location != "not specified"
+        and actual_location not in {"", "n a"}
+        and actual_location != expected_location
+        and actual_location in source_text
+    ):
+        return "location_conflict"
+
+    if normalized_name in seen_names:
+        return "duplicate_name"
+    return None
+
+
 def validate_approved_records(
     candidates: list[dict],
     approved_ids: list[int],
     sources: list[dict[str, str]],
     target_count: int,
     criteria: dict[str, str],
+    rejection_reasons: dict[int, str] | None = None,
+    accepted_ids: list[int] | None = None,
 ) -> list[dict[str, str]]:
     """Keep only QA-approved records whose names and source URLs match collected evidence."""
     source_by_url = {source["URL"]: source for source in sources}
@@ -407,48 +518,32 @@ def validate_approved_records(
     seen_names: set[str] = set()
     for candidate_id in approved_ids:
         if candidate_id < 0 or candidate_id >= len(candidates):
+            if rejection_reasons is not None:
+                rejection_reasons[candidate_id] = "invalid_candidate_id"
             continue
         candidate = candidates[candidate_id]
         source = source_by_url.get(str(candidate.get("Source URL", "")))
         if not source:
+            if rejection_reasons is not None:
+                rejection_reasons[candidate_id] = "source_not_found"
+            continue
+        rejection = candidate_validation_rejection(
+            candidate,
+            source,
+            seen_names,
+            criteria,
+        )
+        if rejection:
+            if rejection_reasons is not None:
+                rejection_reasons[candidate_id] = rejection
             continue
         name = str(candidate.get("Name", "")).strip()
+        normalized_name = normalize_for_match(name)
+        seen_names.add(normalized_name)
+
         source_text = normalize_for_match(
             f"{source['Title']} {source['Snippet']} {source['Page text']}"
         )
-        normalized_name = normalize_for_match(name)
-        if (
-            len(normalized_name.split()) < 2
-            or normalized_name in {"john doe", "jane doe", "unknown person", "not available"}
-            or not normalized_name
-            or normalized_name not in source_text
-        ):
-            continue
-        title = str(candidate.get("Title", "")).strip()
-        normalized_title = normalize_for_match(title)
-        if not title or title.lower() == "n/a" or normalized_title not in source_text:
-            continue
-        requested_role = normalize_for_match(criteria["role"])
-        if requested_role != "not specified":
-            role_tokens = [token.rstrip("s") for token in requested_role.split()]
-            if not all(token in normalized_title.split() for token in role_tokens):
-                continue
-        expected_company = normalize_for_match(criteria["company"])
-        if expected_company != "not specified" and expected_company not in source_text:
-            continue
-        expected_location = normalize_for_match(criteria["location"])
-        actual_location = normalize_for_match(str(candidate.get("Location", "")))
-        if (
-            expected_location != "not specified"
-            and actual_location not in {"", "n a"}
-            and actual_location != expected_location
-            and actual_location in source_text
-        ):
-            continue
-        if normalized_name in seen_names:
-            continue
-        seen_names.add(normalized_name)
-
         record = {}
         for field in fieldnames:
             value = str(candidate.get(field, "N/A")).strip()
@@ -472,6 +567,8 @@ def validate_approved_records(
         record["Source URL"] = source["URL"]
         record["Status"] = "QA VERIFIED - SOURCE MATCHED"
         approved.append(record)
+        if accepted_ids is not None:
+            accepted_ids.append(candidate_id)
         if len(approved) >= target_count:
             break
     return approved
@@ -514,11 +611,24 @@ if submitted:
 
     # --- STEP 2: Live Search and Bounded Public-Page Scraping ---
     with st.status("🌐 **Agent 2 (Web Harvester):** Searching and checking public pages...", expanded=True) as status2:
+        search_progress = st.progress(0, text="Preparing 50 search combinations")
+        search_activity = st.empty()
+
+        def show_search_progress(phase: str, completed: int, total: int, detail: str):
+            phase_label = "Google result pages" if phase == "search" else "public pages"
+            fraction = completed / total if total else 1.0
+            search_progress.progress(
+                fraction,
+                text=f"{phase_label}: {completed}/{total}",
+            )
+            search_activity.caption(detail[:220])
+
         try:
             sources, search_errors, search_stats = harvest_live_data(
                 user_query,
                 meta["location"],
                 max_results=min(100, max(50, target_count * 2)),
+                progress_callback=show_search_progress,
             )
         except Exception as error:
             st.error(f"Web search failed: {error}")
@@ -535,7 +645,10 @@ if submitted:
     st.write(
         f"Searches attempted: {search_stats['queries_attempted']} "
         f"(Google provider: {search_stats['google_queries']}). "
-        f"{search_stats['queries_with_results']} searches returned results; "
+        f"Search combinations planned: {search_stats['search_combinations']} "
+        f"across {search_stats['search_regions']} regions; "
+        f"{search_stats['search_pages_attempted']} Google result pages requested. "
+        f"{search_stats['queries_with_results']} result pages returned results; "
         f"{search_stats['queries_without_results']} returned none; "
         f"{search_stats['search_failures']} provider errors; "
         f"collected {len(sources)} unique sources and attempted page retrieval for "
@@ -608,6 +721,11 @@ Evidence batch {batch_index} of {len(evidence_batches)}:
                 state="running",
                 expanded=True
             )
+            status3.write(
+                f"Batch {batch_index}/{len(evidence_batches)} examined "
+                f"{len(evidence_batch)} source records; {len(candidates)} candidates "
+                "currently have explicit names and source URLs."
+            )
         status3.update(
             label=f"✅ **Agent 3 Done:** Found {len(candidates)} candidates across {len(evidence_batches)} evidence batches.",
             state="complete",
@@ -625,10 +743,22 @@ Evidence batch {batch_index} of {len(evidence_batches)}:
     fieldnames = ["Name", "Title", "Company", "Location", "Email", "Phone", "Source URL", "Status"]
     parsed_records = []
     rejected_count = len(candidates)
+    not_exported_count = 0
     if candidates:
         qa_batches = build_qa_batches(candidates, sources)
         approved_ids = []
         qa_errors = []
+        qa_decisions: dict[int, str] = {}
+        qa_reason_labels = {
+            "source_not_provided": "The cited source was not provided.",
+            "name_not_supported": "The source does not support the full name.",
+            "title_not_supported": "The source does not support the claimed title.",
+            "role_mismatch": "The source does not match the requested role.",
+            "company_mismatch": "The source does not match the requested company.",
+            "location_conflict": "The source conflicts with the requested location.",
+            "not_a_professional_contact": "The source is not an individual professional profile.",
+            "duplicate_or_low_confidence": "The record appears duplicated or lacks sufficient evidence.",
+        }
         with st.status("🧪 **Agent 4 (QA):** Reviewing candidates against their source evidence...", expanded=True) as status4:
             for batch_index, (candidate_batch, source_evidence) in enumerate(qa_batches):
                 start_index = batch_index * 8
@@ -648,7 +778,12 @@ Approve a candidate only if:
 - The record is a real, relevant professional contact, not a placeholder, organization, job ad, or invented profile.
 
 Reject unsupported, contradictory, irrelevant, duplicate-looking, or low-confidence candidates. Do not repair or guess data.
-Return only a JSON object with "approved_ids": an array of integer candidate IDs. Omit every rejected ID.
+Return a JSON object with:
+- "approved_ids": an array of integer candidate IDs that pass every check.
+- "rejected_candidates": an array of objects with "candidate_id" and one concise "reason_code".
+Use only these reason codes: source_not_provided, name_not_supported, title_not_supported,
+role_mismatch, company_mismatch, location_conflict, not_a_professional_contact,
+duplicate_or_low_confidence. Do not include private reasoning or chain-of-thought.
 
 Candidates:
 {json.dumps(numbered_candidates, ensure_ascii=False)}
@@ -672,30 +807,115 @@ Source evidence for these candidates only:
                         for candidate_id in batch_approved_ids
                     ):
                         raise ValueError("QA response must contain only candidate IDs from this batch.")
+                    if len(set(batch_approved_ids)) != len(batch_approved_ids):
+                        raise ValueError("QA response must not repeat candidate IDs.")
+                    reported_rejections = qa_result.get("rejected_candidates", [])
+                    if not isinstance(reported_rejections, list):
+                        raise ValueError("QA rejected_candidates must be a list.")
+                    batch_decisions = {}
+                    for rejection in reported_rejections:
+                        if not isinstance(rejection, dict):
+                            continue
+                        candidate_id = rejection.get("candidate_id")
+                        reason_code = rejection.get("reason_code")
+                        if (
+                            isinstance(candidate_id, int)
+                            and not isinstance(candidate_id, bool)
+                            and candidate_id in valid_batch_ids
+                            and candidate_id not in batch_approved_ids
+                            and isinstance(reason_code, str)
+                            and reason_code in qa_reason_labels
+                        ):
+                            batch_decisions[candidate_id] = qa_reason_labels[reason_code]
+                    for candidate_id in valid_batch_ids:
+                        if candidate_id in batch_approved_ids:
+                            batch_decisions[candidate_id] = "Passed Agent 4 evidence review."
+                        else:
+                            batch_decisions.setdefault(
+                                candidate_id,
+                                "Not approved; Agent 4 did not return a specific reason.",
+                            )
                     approved_ids.extend(batch_approved_ids)
+                    qa_decisions.update(batch_decisions)
                 except Exception as error:
                     qa_errors.append(f"QA batch {batch_index + 1}: {error}")
+                    for candidate_id in range(start_index, start_index + len(candidate_batch)):
+                        qa_decisions[candidate_id] = "QA batch failed; candidate was not approved."
                 status4.update(
                     label=(
                         f"🧪 **Agent 4 (QA):** Reviewed candidate batch "
-                        f"{batch_index + 1}/{len(qa_batches)}."
+                        f"{batch_index + 1}/{len(qa_batches)}; "
+                        f"{len(approved_ids)} candidates provisionally approved."
                     ),
                     state="running",
                     expanded=True
+                )
+                status4.write(
+                    f"Checked {len(candidate_batch)} candidates against "
+                    f"{len(source_evidence)} source records in this batch."
                 )
             if qa_errors:
                 st.write(f"QA could not review {len(qa_errors)} batch(es); those candidates were rejected.")
             if not approved_ids and candidates and not qa_errors:
                 st.info("QA rejected all candidates; no records will be exported.")
+            deterministic_rejections: dict[int, str] = {}
+            accepted_ids: list[int] = []
             parsed_records = validate_approved_records(
-                candidates, approved_ids, sources, target_count, meta
+                candidates,
+                approved_ids,
+                sources,
+                target_count,
+                meta,
+                rejection_reasons=deterministic_rejections,
+                accepted_ids=accepted_ids,
             )
-            rejected_count = len(candidates) - len(parsed_records)
+            deterministic_reason_labels = {
+                "source_not_found": "The cited source URL was not collected.",
+                "name_not_supported": "The full name is not present in the cited source.",
+                "title_not_supported": "The claimed title is not present in the cited source.",
+                "role_mismatch": "The title does not contain the requested role.",
+                "company_not_supported": "The requested company is not present in the cited source.",
+                "location_conflict": "The stated location conflicts with the cited source.",
+                "duplicate_name": "A duplicate name was already approved.",
+                "invalid_candidate_id": "Agent 4 returned an invalid candidate ID.",
+            }
+            for candidate_id, reason_code in deterministic_rejections.items():
+                qa_decisions[candidate_id] = deterministic_reason_labels.get(
+                    reason_code,
+                    "The record failed a deterministic evidence check.",
+                )
+            rejected_count = len(candidates) - len(set(approved_ids)) + len(deterministic_rejections)
+            not_exported_count = max(
+                0,
+                len(candidates) - rejected_count - len(accepted_ids),
+            )
             status4.update(
                 label=f"✅ **Agent 4 Done:** Approved {len(parsed_records)} of {len(candidates)} candidates.",
                 state="complete",
                 expanded=False
             )
+        if candidates:
+            with st.expander("Agent 4 candidate decisions", expanded=not parsed_records):
+                accepted_candidate_ids = set(accepted_ids)
+                decision_rows = []
+                for candidate_id, candidate in enumerate(candidates):
+                    decision = "Rejected"
+                    review_summary = qa_decisions.get(
+                        candidate_id,
+                        "Not reviewed; no approval was returned.",
+                    )
+                    if candidate_id in accepted_candidate_ids:
+                        decision = "Approved"
+                    elif candidate_id in approved_ids and candidate_id not in deterministic_rejections:
+                        decision = "Not exported"
+                        review_summary = "Approved, but the requested contact count was already reached."
+                    decision_rows.append({
+                        "Candidate": candidate.get("Name", "N/A"),
+                        "Decision": decision,
+                        "Review summary": review_summary,
+                        "Source URL": candidate.get("Source URL", "N/A"),
+                    })
+                st.dataframe(pd.DataFrame(decision_rows), use_container_width=True, hide_index=True)
 
     # Python Native CSV Serialization
     csv_filename = "contacts_output.csv"
@@ -712,7 +932,8 @@ Source evidence for these candidates only:
         f.write(csv_data)
 
     st.success(
-        f"🎉 QA approved **{len(parsed_records)} contacts** and rejected **{rejected_count}** candidates. "
+        f"🎉 QA verified **{len(parsed_records)} contacts** and rejected **{rejected_count}** candidates. "
+        f"{not_exported_count} approved candidates were not exported because the requested count was reached. "
         f"Saved results to `{os.path.abspath(csv_filename)}`."
     )
     if not parsed_records:
