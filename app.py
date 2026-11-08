@@ -16,6 +16,7 @@ import ollama
 import requests
 from bs4 import BeautifulSoup
 from ddgs import DDGS
+from ddgs.exceptions import DDGSException
 from streamlit.errors import StreamlitSecretNotFoundError
 
 # --- Page Configuration ---
@@ -182,11 +183,26 @@ def scrape_public_page(url: str, robots_cache: dict[str, bool]) -> tuple[str, st
 
 
 def build_search_plan(query_text: str, location: str) -> list[tuple[str, str]]:
-    """Build a balanced set of topical and regional search queries."""
-    search_regions = (
-        "wt-wt", "us-en", "uk-en", "in-en", "au-en", "ca-en",
-        "sg-en", "de-de", "fr-fr", "ae-en", "za-en", "br-pt"
-    )
+    """Build a small, location-aware set of queries for Google's search index."""
+    location_regions = {
+        "india": "in-en", "hyderabad": "in-en", "bengaluru": "in-en",
+        "bangalore": "in-en", "mumbai": "in-en", "delhi": "in-en",
+        "united states": "us-en", "usa": "us-en", "us": "us-en",
+        "united kingdom": "uk-en", "uk": "uk-en", "london": "uk-en",
+        "canada": "ca-en", "australia": "au-en", "singapore": "sg-en",
+        "germany": "de-de", "france": "fr-fr", "uae": "ae-en",
+        "south africa": "za-en", "brazil": "br-pt",
+    }
+    normalized_location = location.strip().lower()
+    if normalized_location in {"not specified", "worldwide", "global", "all regions"}:
+        search_regions = ("in-en", "us-en", "uk-en", "au-en", "sg-en", "ae-en")
+    else:
+        matched_region = next(
+            (region for place, region in location_regions.items() if place in normalized_location),
+            "wt-wt",
+        )
+        search_regions = (matched_region, "wt-wt") if matched_region != "wt-wt" else ("wt-wt",)
+
     core_queries = (
         query_text,
         f"{query_text} people team",
@@ -194,16 +210,14 @@ def build_search_plan(query_text: str, location: str) -> list[tuple[str, str]]:
     )
     plan = [(query, region) for region in search_regions for query in core_queries]
 
-    if location.lower() in {"not specified", "worldwide", "global", "all regions"}:
+    if normalized_location in {"not specified", "worldwide", "global", "all regions"}:
         additional_queries = (
-            f"{query_text} North America",
             f"{query_text} Europe",
             f"{query_text} Asia Pacific",
             f"{query_text} South Asia",
             f"{query_text} Middle East and Africa",
             f"{query_text} Latin America",
             f"{query_text} staff directory",
-            f"{query_text} leadership team",
         )
     else:
         additional_queries = (
@@ -211,13 +225,10 @@ def build_search_plan(query_text: str, location: str) -> list[tuple[str, str]]:
             f"{query_text} employee directory",
             f"{query_text} team members",
             f"{query_text} leadership team",
-            f"{query_text} public profile",
             f"{query_text} company people",
-            f"{query_text} contact directory",
-            f"{query_text} employee names",
         )
     plan.extend((query, "wt-wt") for query in additional_queries)
-    return plan
+    return list(dict.fromkeys(plan))
 
 
 def harvest_live_data(query_text: str, location: str, max_results: int = 100):
@@ -228,8 +239,7 @@ def harvest_live_data(query_text: str, location: str, max_results: int = 100):
     seen_urls: set[str] = set()
     stats = {
         "queries_attempted": 0,
-        "multiengine_queries": 0,
-        "fallback_queries": 0,
+        "google_queries": 0,
         "queries_with_results": 0,
         "queries_without_results": 0,
         "search_failures": 0,
@@ -240,31 +250,21 @@ def harvest_live_data(query_text: str, location: str, max_results: int = 100):
         with DDGS(timeout=8) as ddgs:
             for query, region in search_plan:
                 stats["queries_attempted"] += 1
-                stats["multiengine_queries"] += 1
+                stats["google_queries"] += 1
                 try:
                     results = ddgs.text(
                         query=query,
                         region=region,
-                        backend="yandex,google,bing,brave,duckduckgo,mojeek,startpage,yahoo",
+                        backend="google",
                         max_results=10,
                     ) or []
                 except Exception as error:
-                    errors.append(f"Multi-engine search failed for '{query}' ({region}): {error}")
-                    stats["search_failures"] += 1
-                    results = []
-
-                if not results and stats["fallback_queries"] < 6:
-                    stats["fallback_queries"] += 1
-                    try:
-                        results = ddgs.text(
-                            query=query,
-                            region=region,
-                            backend="yandex",
-                            max_results=10,
-                        ) or []
-                    except Exception as error:
-                        errors.append(f"Explicit provider fallback failed for '{query}' ({region}): {error}")
+                    if isinstance(error, DDGSException) and "No results found" in str(error):
+                        results = []
+                    else:
+                        errors.append(f"Google search failed for '{query}' ({region}): {error}")
                         stats["search_failures"] += 1
+                    results = []
 
                 if results:
                     stats["queries_with_results"] += 1
@@ -534,8 +534,7 @@ if submitted:
 
     st.write(
         f"Searches attempted: {search_stats['queries_attempted']} "
-        f"(multi-engine: {search_stats['multiengine_queries']}; "
-        f"explicit-provider fallbacks: {search_stats['fallback_queries']}). "
+        f"(Google provider: {search_stats['google_queries']}). "
         f"{search_stats['queries_with_results']} searches returned results; "
         f"{search_stats['queries_without_results']} returned none; "
         f"{search_stats['search_failures']} provider errors; "
